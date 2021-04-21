@@ -99,6 +99,10 @@ _GETHOMEDATA_REQ       = _BASE_URL + "api/gethomedata"
 _GETCAMERAPICTURE_REQ  = _BASE_URL + "api/getcamerapicture"
 _GETEVENTSUNTIL_REQ    = _BASE_URL + "api/geteventsuntil"
 
+# Energy API
+_ENERGY_GETHOMEDATA_REQ = _BASE_URL + "api/homesdata"
+_ENERGY_GETHOMESTATUS_REQ = _BASE_URL + "api/homestatus"
+
 
 #TODO# Undocumented (but would be very usefull) API : Access currently forbidden (403)
 
@@ -189,7 +193,7 @@ class ClientAuth:
                        password=_PASSWORD,
                        scope="read_station read_camera access_camera write_camera " \
                                  "read_presence access_presence write_presence read_thermostat write_thermostat"):
-        
+
         postParams = {
                 "grant_type" : "password",
                 "client_id" : clientId,
@@ -254,50 +258,108 @@ class UserInfo:
 
 class ThermostatData:
     """
-    List the Thermostat and temperature modules
-
-    Args:
-        authData (clientAuth): Authentication information with a working access Token
-        home : Home name or id of the home who's thermostat belongs to
+    This class is now deprecated (2018). Use EnergyData instead
     """
-    def __init__(self, authData, home=None):
 
-        # I don't own a thermostat thus I am not able to test the Thermostat support
-        warnings.warn("The Thermostat code is not tested due to the lack of test environment.\n" \
-                      "As Netatmo is continuously breaking API compatibility, risk that current bindings are wrong is high.\n" \
-                      "Please report found issues (https://github.com/philippelt/netatmo-api-python/issues)",
-                       RuntimeWarning )
+    def __init__(self, authData, station=None):
+        warnings.warn("The 'ThermostatData' class was moved to 'EnergyData' to handle Valve capabilities",
+            DeprecationWarning )
 
         self.getAuthToken = authData.accessToken
         postParams = {
                 "access_token" : self.getAuthToken
                 }
+
         resp = postRequest(_GETTHERMOSTATDATA_REQ, postParams)
         self.rawData = resp['body']['devices']
-        if not self.rawData : raise NoDevice("No thermostat available")
-        self.thermostatData = filter_home_data(self.rawData, home)
-        if not self.thermostatData : raise NoHome("No home %s found" % home)
-        self.thermostatData['name'] = self.thermostatData['home_name']
-        for m in self.thermostatData['modules']:
-            m['name'] = m['module_name']
-        self.defaultThermostat = self.thermostatData['home_name']
-        self.defaultThermostatId = self.thermostatData['_id']
-        self.defaultModule = self.thermostatData['modules'][0]
+        if not self.rawData:
+            raise NoDevice("No station available")
 
-    def getThermostat(self, name=None):
-        if ['name'] != name: return None
-        else: return 
+        self.stations = { d['_id'] : d for d in self.rawData }
+        if station:
+            if station in self.stations:
+                self.default_station = station
+            else:
+                for stationId, stationData in self.stations:
+                    if stationData['station_name'] == station:
+                        self.default_station = stationId
+        else:
+             self.default_station = station or list(self.stations.keys())[0]
+
+        if not self.default_station:
+            raise NoDevice("No station with name or id %s" % station)
+
+        self.modules = dict()
+        for stationId, stationData in self.stations.items():
+            for m in stationData['modules']:
+                self.modules[m['_id']] = m
+                self.modules[m['_id']]['station'] = stationId
+
+    # Stations
+    def stationsIdList(self):
+        return self.stations.keys()
+
+    def stationById(self, stationId):
+        return None if not stationId in self.stations else self.stations[stationId]
+
+    def thermostatByName(self, name=None):
+        if name:
+            return None if not name in self.stations else self.stations[name]
         return self.thermostat[self.defaultThermostatId]
 
-    def moduleNamesList(self, name=None, tid=None):
-        thermostat = self.getThermostat(name=name, tid=tid)
-        return [m['name'] for m in thermostat['modules']] if thermostat else None
+    # Modules
+    def modulesIdList(self, stationId=None):
+        if not stationId:
+            return self.modules.keys()
+        return [ m['_id'] for m in self.modules.values() if m['station'] == stationId ]
 
-    def getModuleByName(self, name, thermostatId=None):
-        thermostat = self.getThermostat(tid=thermostatId)
-        for m in thermostat['modules']:
-            if m['name'] == name: return m
-        return None
+    def moduleById(self, moduleId=None):
+        return None if not moduleId in self.modules else self.modules[moduleId]
+
+
+class EnergyData:
+    """
+    List the Energy devices (thermostats and valves)
+
+    Args:
+        authData (ClientAuth): Authentication information with a working access Token
+    """
+
+    def __init__(self, authData, homeId):
+        self.getAuthToken = authData.accessToken
+        postParams = {
+                "access_token" : self.getAuthToken,
+                "home_id" : homeId
+                }
+
+        resp = postRequest(_ENERGY_GETHOMESTATUS_REQ, postParams)
+        self.rawData = resp['body']['home']
+
+        if not self.rawData:
+            raise NoDevice("No home with id %s" % homeId)
+
+        self.homeId = homeId
+        self.modules = dict()
+        for module in self.rawData['modules']:
+            self.modules[module['id']] = module
+
+        self.rooms = dict()
+        for room in self.rawData['rooms']:
+            self.rooms[room['id']] = room
+
+    # Modules
+    def modulesIdList(self):
+        return self.modules.keys()
+
+    def moduleById(self, moduleId=None):
+        return None if not moduleId in self.modules else self.modules[moduleId]
+
+    # Rooms
+    def roomsIdList(self):
+        return self.rooms.keys()
+
+    def roomById(self, roomId=None):
+        return None if not roomId in self.rooms else self.rooms[roomId]
 
 
 class WeatherStationData:
@@ -471,22 +533,51 @@ class HomeData:
         postParams = {
             "access_token" : self.getAuthToken
             }
-        resp = postRequest(_GETHOMEDATA_REQ, postParams)
-        self.rawData = resp['body']
-        # Collect homes
-        self.homes = { d['id'] : d for d in self.rawData['homes'] }
-        if not self.homes : raise NoDevice("No home available")
-        self.default_home = home or list(self.homes.values())[0]['name']
+
         # Split homes data by category
         self.persons = dict()
         self.events = dict()
         self.cameras = dict()
         self.lastEvent = dict()
-        for i in range(len(self.rawData['homes'])):
-            curHome = self.rawData['homes'][i]
+        self.rooms = dict()
+        self.modules = dict()
+
+        if "read_camera" in authData._scope or "read_presence" in authData._scope or "read_smokedetector" in authData._scope:
+            resp = postRequest(_GETHOMEDATA_REQ, postParams)
+            self.rawData = resp['body']
+            # Collect homes
+            self.homes = { d['id'] : d for d in self.rawData['homes'] }
+
+        if "read_thermostat" in authData._scope:
+            resp = postRequest(_ENERGY_GETHOMEDATA_REQ, postParams)
+            # Merge home status
+            if not self.rawData:
+                self.rawData = resp['body']
+                self.homes = { d['id'] : d for d in self.rawData['homes'] }
+            else:
+                for h in resp['body']['homes']:
+                    if not h['id'] in self.homes:
+                        self.homes[ h['id'] ] = h
+                        self.rawData['homes'].append(h)
+
+                    if 'rooms' in h:
+                        self.homes[ h['id'] ]['rooms'] = h['rooms']
+                    if 'modules' in h:
+                        self.homes[ h['id'] ]['modules'] = h['modules']
+
+        if not self.homes : raise NoDevice("No home available")
+        self.default_home = home or list(self.homes.values())[0]['name']
+
+        for i in self.homes:
+            curHome = self.homes[i]
             nameHome = curHome['name']
             if nameHome not in self.cameras:
                 self.cameras[nameHome] = dict()
+            if nameHome not in self.rooms:
+                self.rooms[nameHome] = dict()
+            if nameHome not in self.modules:
+                self.modules[nameHome] = dict()
+
             if 'persons' in curHome:
                 for p in curHome['persons']:
                     self.persons[ p['id'] ] = p
@@ -499,10 +590,27 @@ class HomeData:
                 for c in curHome['cameras']:
                     self.cameras[nameHome][ c['id'] ] = c
                     c["home_id"] = curHome['id']
+            if 'rooms' in curHome:
+                for r in curHome['rooms']:
+                    self.rooms[nameHome][ r['id'] ] = r
+                    r["home_id"] = curHome['id']
+            if 'modules' in curHome:
+                for m in curHome['modules']:
+                    self.modules[nameHome][ m['id'] ] = m
+                    m["home_id"] = curHome['id']
+
         for camera in self.events:
             self.lastEvent[camera] = self.events[camera][sorted(self.events[camera])[-1]]
-        if not self.cameras[self.default_home] : raise NoDevice("No camera available in default home")
-        self.default_camera = list(self.cameras[self.default_home].values())[0]
+
+        self.default_camera = None
+        if self.cameras[self.default_home]:
+            self.default_camera = list(self.cameras[self.default_home].values())[0]
+
+    def defaultHomeName(self):
+        return self.default_home
+
+    def homesIdList(self):
+        return [ hid for hid in self.homes ]
 
     def homeById(self, hid):
         return None if hid not in self.homes else self.homes[hid]
@@ -513,6 +621,39 @@ class HomeData:
             if value['name'] == home:
                 return self.homes[key]
 
+    def roomsIdList(self, homeName):
+        return [] if homeName not in self.rooms else self.rooms[homeName]
+
+    def roomById(self, rid):
+        for home, room in self.rooms.items():
+            if rid in self.rooms[home]:
+                return self.rooms[home][rid]
+
+        return None
+
+    def modulesIdList(self, homeName = None, roomName = None):
+        return [ m['id']
+                    for mh in self.modules.values()
+                        for m in mh.values()
+                        if (
+                            not homeName
+                            or self.homeById(m['home_id'])['name'] == homeName
+                        ) and (
+                            not roomName
+                            or (
+                                'room_id' in m
+                                and self.roomById(m['room_id'])['name'] == roomName
+                            )
+                        )
+                ]
+
+    def moduleById(self, mid):
+        for home, module in self.modules.items():
+            if mid in self.modules[home]:
+                return self.modules[home][mid]
+
+        return None
+
     def cameraById(self, cid):
         for home,cam in self.cameras.items():
             if cid in self.cameras[home]:
@@ -521,6 +662,8 @@ class HomeData:
 
     def cameraByName(self, camera=None, home=None):
         if not camera and not home:
+            if not self.default_camera:
+                raise NoDevice("No camera available in default home")
             return self.default_camera
         elif home and camera:
             if home not in self.cameras:
@@ -703,7 +846,7 @@ class HomeData:
         if camera["type"] != "NOC": return None # Not a presence camera
         vpnUrl, localUrl = self.cameraUrls(cid=camera["id"])
         return localUrl
-    
+
     def presenceLight(self, camera=None, home=None, cid=None, setting=None):
         url = self.presenceUrl(home=home, camera=camera) or self.cameraById(cid=cid)
         if not url or setting not in ("on", "off", "auto"): return None
@@ -749,22 +892,10 @@ class WelcomeData(HomeData):
     pass
 
 # Utilities routines
-
-
-def filter_home_data(rawData, home):
-    if home:
-        # Find a home who's home id or name is the one requested
-        for h in rawData:
-            if h["home_name"] == home or h["home_id"] == home:
-                return h
-        return None
-    # By default, the first home is returned
-    return rawData[0]
-
 def cameraCommand(cameraUrl, commande, parameters=None, timeout=3):
     url = cameraUrl + ( commande % parameters if parameters else commande)
     return postRequest(url, timeout=timeout)
-    
+
 def postRequest(url, params=None, timeout=10):
     if PYTHON3:
         req = urllib.request.Request(url)
@@ -825,7 +956,7 @@ def getStationMinMaxTH(station=None, module=None, home=None):
             result[m] = (r[0], lastD[m]['Temperature'], r[1])
     else:
         if time.time()-lastD[module]['When'] > 3600 : result = ["-", "-"]
-        else : 
+        else :
             result = [lastD[module]['Temperature'], lastD[module]['Humidity']]
             result.extend(devList.MinMaxTH(module))
     return result
@@ -836,7 +967,7 @@ def getStationMinMaxTH(station=None, module=None, home=None):
 if __name__ == "__main__":
 
     from sys import exit, stdout, stderr
-    
+
     logging.basicConfig(format='%(name)s - %(levelname)s: %(message)s', level=logging.INFO)
 
     if not _CLIENT_ID or not _CLIENT_SECRET or not _USERNAME or not _PASSWORD :
@@ -844,7 +975,7 @@ if __name__ == "__main__":
            exit(1)
 
     authorization = ClientAuth()  # Test authentication method
-    
+
     try:
         weatherStation = WeatherStationData(authorization)         # Test DEVICELIST
     except NoDevice:
@@ -856,11 +987,56 @@ if __name__ == "__main__":
         homes = HomeData(authorization)
     except NoDevice :
         logger.warning("No home available for testing")
+    else:
+        print("Default home: %s" % (homes.defaultHomeName()))
+        print("Homes:")
+        for homeId in homes.homesIdList():
+            h = homes.homeById(homeId)
+            print("  - %s (%s)" % (homeId, h['name']))
+
+            print("    Rooms:")
+            hr = homes.roomsIdList(h['name'])
+            for roomId in hr:
+                r = homes.roomById(roomId)
+                print("    - %s (%s)" % (roomId, r['name']))
+
+                hm = homes.modulesIdList(h['name'], r['name'])
+                for moduleId in hm:
+                    m = homes.moduleById(moduleId)
+                    print("      - %s (%s)" % (moduleId, m['name']))
+
+            try:
+                hEnergy = EnergyData(authorization, homeId)
+            except NoDevice :
+                logger.warning("No energy data available for testing")
+            else:
+                print("    Energy data:")
+                print("      Rooms:")
+                her = hEnergy.roomsIdList()
+                for roomId in her:
+                    r = hEnergy.roomById(roomId)
+                    print("       - %s: %.1f°C/%.1f°C" % (roomId, r['therm_measured_temperature'], r['therm_setpoint_temperature']))
+
+                print("      Modules:")
+                hem = hEnergy.modulesIdList()
+                for moduleId in hem:
+                    m = hEnergy.moduleById(moduleId)
+                    print("      - %s: type %s, rf strength %d, battery level %d" % (moduleId, m['type'], m['rf_strength'], m['battery_level'] if 'battery_level' in m else 0))
+
 
     try:
         thermostat = ThermostatData(authorization)
     except NoDevice:
         logger.warning("No thermostat avaible for testing")
+    else:
+        print("Thermostat stations:")
+        for stationId in thermostat.stationsIdList():
+            t = thermostat.stationById(stationId)
+            print(" - %s (%s)" % (stationId, t['station_name']))
+
+            for moduleId in thermostat.modulesIdList(stationId):
+                m = thermostat.moduleById(moduleId)
+                print("   - %s (%s): firmware version %d, battery %d%%" % (moduleId, m['module_name'], m['firmware'], m['battery_percent']))
 
     # If we reach this line, all is OK
     logger.info("OK")
